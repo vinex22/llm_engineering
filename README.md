@@ -58,6 +58,22 @@ ORIGINAL INSTRUCTIONS for people on the version prior to October 2025:
 - Mac people please follow the instructions here: [Original Mac instructions](setup/SETUP-mac.md)  
 - Linux people please follow the instructions here: [Original Linux instructions](setup/SETUP-linux.md)
 
+## Configure your `.env`
+
+Many notebooks load configuration from a local `.env` file (this file is git-ignored).
+
+1. Create your local `.env` from the template:
+    - Mac/Linux: `cp .env.example .env`
+    - Windows (PowerShell): `copy .env.example .env`
+2. Edit `.env` and set the values you want.
+
+Common variables used across the notebooks:
+- `OPENAI_API_KEY` (for API-key based usage)
+- `ENDPOINT_URL`, `DEPLOYMENT_NAME`, `OPENAI_API_VERSION` (for Azure OpenAI usage)
+- `CHAT_DEPLOYMENT_NAME` (if present, used as an easy “one-line switch” for chat deployments)
+
+If you are using Azure OpenAI with Microsoft Entra ID (no API key), you typically authenticate locally using `az login` (or set `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` for a service principal).
+
 ### An important point on API costs (which are optional! No need to spend if you don't wish)
 
 During the course, I'll suggest you try out the leading models at the forefront of progress, known as the Frontier models. I'll also suggest you run open-source models using Google Colab. These services have some charges, but I'll keep cost minimal - like, a few cents at a time. And I'll provide alternatives if you'd prefer not to use them.
