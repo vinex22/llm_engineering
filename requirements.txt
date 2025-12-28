@@ -36,3 +36,7 @@ sentence_transformers
 feedparser
 protobuf==3.20.2
 wandb
+azure-ai-projects
+azure-identity
+azure-identity-broker
+
