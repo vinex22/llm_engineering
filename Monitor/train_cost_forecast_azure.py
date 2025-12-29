@@ -49,7 +49,7 @@ except ImportError as e:
 # Configuration
 SUBSCRIPTION_ID = "555a1e03-73fb-4f88-9296-59bd703d16f3"  # Matches your other scripts
 TRAINING_DAYS = 90  # Look back 90 days
-FORECAST_DAYS = 90  # Predict next 30 days
+FORECAST_DAYS = 365  # Predict next 12 months
 
 def print_header():
     print("\n" + "="*70)
@@ -149,7 +149,7 @@ def select_service(df):
     """Deprecated: Interactive meter selection."""
     pass
 
-def train_and_forecast(df, periods=90):
+def train_and_forecast(df, periods=365):
     """Train Prophet model and generate forecast."""
     # Suppress Prophet output
     logging.getLogger('prophet').setLevel(logging.CRITICAL)
@@ -164,6 +164,13 @@ def train_and_forecast(df, periods=90):
             yearly_seasonality=False,
             changepoint_prior_scale=0.05
         )
+        
+        # Add Hong Kong holidays
+        try:
+            model.add_country_holidays(country_name='HK')
+        except Exception:
+            # Fallback if holidays package not installed or country code invalid
+            pass
         
         model.fit(df)
         
@@ -185,47 +192,33 @@ def train_and_forecast(df, periods=90):
         # print(f"❌ Error training model: {e}")
         return None, None
 
-def print_report_row(service_name, df, forecast, status="Active"):
-    """Print a single row summary for a service with actuals vs forecast."""
+def print_report_row(service_name, df, forecast, months, status="Active"):
+    """Print a single row summary with monthly breakdown."""
     
-    last_actual_date = df['ds'].max()
-    
-    # Calculate Actuals (Last 30 days)
-    start_date_30d_ago = last_actual_date - timedelta(days=30)
-    actual_30 = df[df['ds'] > start_date_30d_ago]['y'].sum()
-    
-    # Calculate Average Daily Cost (Last 7 days) - for sanity check
-    start_date_7d_ago = last_actual_date - timedelta(days=7)
-    avg_7d = df[df['ds'] > start_date_7d_ago]['y'].mean()
-    if pd.isna(avg_7d): avg_7d = 0.0
-
-    # Calculate forecasts for different horizons
-    future_forecast = forecast[forecast['ds'] > last_actual_date]
-    
-    def get_forecast_sum(days):
-        target_date = last_actual_date + timedelta(days=days)
-        mask = (future_forecast['ds'] <= target_date)
-        return future_forecast.loc[mask, 'yhat'].sum()
-
-    cost_30 = get_forecast_sum(30)
-    cost_60 = get_forecast_sum(60)
-    cost_90 = get_forecast_sum(90)
-    
-    # Trend
-    avg_daily_hist = df['y'].mean()
-    avg_daily_future = future_forecast['yhat'].mean()
-    trend = "↗" if avg_daily_future > avg_daily_hist else "↘"
+    # Calculate forecasts for the specific months
+    forecast = forecast.copy()
+    forecast['month'] = forecast['ds'].dt.to_period('M')
+    monthly_sums = forecast.groupby('month')['yhat'].sum()
     
     # Status indicator
     status_icon = ""
     if status == "New": status_icon = "🆕"
     elif status == "Inactive": status_icon = "❌"
     
-    # Print with Actuals column
-    name_display = f"{status_icon} {service_name[:23]}"
-    print(f"{name_display:<27} ${avg_7d:<9.2f} ${actual_30:<10.2f} ${cost_30:<10.2f} ${cost_60:<10.2f} ${cost_90:<10.2f} {trend}")
+    # Prepare row string
+    name_display = f"{status_icon} {service_name[:20]}" # Shorten name to fit
+    row_str = f"{name_display:<24}"
+    
+    total_row_cost = 0
+    for m in months:
+        val = monthly_sums.get(m, 0.0)
+        row_str += f" ${val:<8.0f}" 
+        total_row_cost += val
+        
+    row_str += f" ${total_row_cost:<9.0f}"
+    print(row_str)
 
-def generate_flat_forecast(df, periods=90):
+def generate_flat_forecast(df, periods=400):
     """Generate a flat forecast based on recent average (for new services)."""
     last_date = df['ds'].max()
     
@@ -259,24 +252,37 @@ def main():
     if df_raw is None or df_raw.empty:
         return
 
-    # Global max date to detect inactive services
+    # Global max date
     global_max_date = df_raw['date'].max()
     print(f"📅 Data available up to: {global_max_date.date()}")
 
-    # Get all unique meters
-    meters = df_raw['service'].unique()
+    # Define the 12 months to display (starting next full month)
+    # If we are in Dec 29, next full month is Jan.
+    start_date = global_max_date + timedelta(days=1)
+    start_period = pd.Period(start_date, freq='M')
     
-    print("\n" + "="*100)
-    print(f"🔮 Forecast Summary (Actuals vs Forecast)")
-    print("="*100)
-    print(f"{'Meter Name':<27} {'Avg(7d)':<10} {'Act(30d)':<11} {'Fcst(30d)':<11} {'Fcst(60d)':<11} {'Fcst(90d)':<11} {'Trend'}")
-    print("-" * 100)
+    # If we are late in the month (>20th), start next month to avoid partial month confusion
+    if start_date.day > 20:
+        start_period = start_period + 1
+        
+    months = [start_period + i for i in range(12)]
+    
+    # Print Headers
+    header_str = f"{'Meter Name':<24}"
+    for m in months:
+        month_label = m.strftime("%b'%y")
+        header_str += f" {month_label:<9}"
+    header_str += f" {'Total':<10}"
+    
+    print("\n" + "="*len(header_str))
+    print(f"🔮 12-Month Forecast Breakdown")
+    print("="*len(header_str))
+    print(header_str)
+    print("-" * len(header_str))
 
     # Process each meter
-    total_act_30 = 0
-    total_30 = 0
-    total_60 = 0
-    total_90 = 0
+    totals = {m: 0.0 for m in months}
+    grand_total = 0
     
     # Sort meters by total historical cost
     meter_costs = df_raw.groupby('service')['cost'].sum().sort_values(ascending=False)
@@ -299,59 +305,50 @@ def main():
         model = None
         forecast = None
         
+        # Forecast 400 days to ensure we cover the 12 months
+        forecast_days = 400
+        
         if days_inactive > 2:
             status = "Inactive"
-            # Forecast is 0 for inactive services
-            future_dates = [last_date + timedelta(days=x) for x in range(1, 91)]
+            future_dates = [last_date + timedelta(days=x) for x in range(1, forecast_days + 1)]
             forecast = pd.DataFrame({
                 'ds': future_dates,
-                'yhat': [0] * 90
+                'yhat': [0] * forecast_days
             })
-            # Add history
             history = df_prophet[['ds', 'y']].rename(columns={'y': 'yhat'})
             forecast = pd.concat([history, forecast])
             
         elif age_days < 14:
             status = "New"
-            # Use flat forecast for new services to avoid wild extrapolation
-            model, forecast = generate_flat_forecast(df_prophet, periods=90)
+            model, forecast = generate_flat_forecast(df_prophet, periods=forecast_days)
             
         else:
-            # Standard Prophet forecast
             if len(df_prophet) >= 5:
-                model, forecast = train_and_forecast(df_prophet, periods=90)
+                model, forecast = train_and_forecast(df_prophet, periods=forecast_days)
             else:
-                # Not enough data for Prophet but active -> Flat forecast
-                model, forecast = generate_flat_forecast(df_prophet, periods=90)
+                model, forecast = generate_flat_forecast(df_prophet, periods=forecast_days)
         
         if forecast is not None:
-            print_report_row(service_name, df_prophet, forecast, status)
+            print_report_row(service_name, df_prophet, forecast, months, status)
             
             # Add to totals
-            future = forecast[forecast['ds'] > last_date]
+            forecast['month'] = forecast['ds'].dt.to_period('M')
+            monthly_sums = forecast.groupby('month')['yhat'].sum()
             
-            # Actuals total
-            start_date_30d_ago = last_date - timedelta(days=30)
-            total_act_30 += df_prophet[df_prophet['ds'] > start_date_30d_ago]['y'].sum()
-            
-            # Forecast totals
-            # Note: We align forecast to the global timeline for totals
-            # If a service is inactive, its forecast is 0, so it adds 0.
-            # If a service is active, its forecast starts from its last_date.
-            
-            # We need to be careful summing up. 
-            # We want the sum of costs for the NEXT 30 days from TODAY (global_max_date).
-            
-            # Filter forecast for dates > global_max_date
-            future_global = forecast[forecast['ds'] > global_max_date]
-            
-            total_30 += future_global[future_global['ds'] <= global_max_date + timedelta(days=30)]['yhat'].sum()
-            total_60 += future_global[future_global['ds'] <= global_max_date + timedelta(days=60)]['yhat'].sum()
-            total_90 += future_global[future_global['ds'] <= global_max_date + timedelta(days=90)]['yhat'].sum()
+            row_total = 0
+            for m in months:
+                val = monthly_sums.get(m, 0.0)
+                totals[m] += val
+                row_total += val
+            grand_total += row_total
 
-    print("-" * 100)
-    print(f"{'TOTAL':<27} {'-':<10} ${total_act_30:<10.2f} ${total_30:<10.2f} ${total_60:<10.2f} ${total_90:<10.2f}")
-    print("="*100 + "\n")
+    print("-" * len(header_str))
+    total_str = f"{'TOTAL':<24}"
+    for m in months:
+        total_str += f" ${totals[m]:<8.0f}"
+    total_str += f" ${grand_total:<9.0f}"
+    print(total_str)
+    print("="*len(header_str) + "\n")
     print("Legend: 🆕 = New Service (<14 days), ❌ = Inactive/Deleted (>2 days no data)")
 
 if __name__ == "__main__":
